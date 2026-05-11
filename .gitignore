@@ -1,0 +1,26 @@
+# Entornos locales
+.venv/
+venv/
+env/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Datos reales: no deberían subirse al repo
+data/raw/*
+data/processed/*
+data/exports/*
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+!data/exports/.gitkeep
+
+# Configuración sensible
+.streamlit/secrets.toml
+.env
+
+# Archivos de sistema
+.DS_Store
+Thumbs.db
+
+# Configuración local del IDE
+.claude/

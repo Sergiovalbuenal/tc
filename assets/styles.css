@@ -1,0 +1,314 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=Outfit:wght@300;400;500;600;700;800&display=swap');
+
+:root {
+    /* Paleta base (inspirada en UCompensar) */
+    --primary: #f28c00;       /* Naranja institucional aprox. */
+    --primary-light: #ffb55a;
+    --primary-dark: #d97400;
+    --accent: #2b2f36;        /* Gris oscuro */
+    --background: #fff7ef;    /* Fondo cálido claro */
+    --card: #ffffff;
+    --text-main: #1f2937;     /* Gris 800 */
+    --text-muted: #6b7280;    /* Gris 500 */
+    --border: #e5e7eb;        /* Gris 200 */
+    --sidebar-bg: #2a1700;    /* Naranja muy oscuro (base sidebar) */
+    --radius-lg: 1.25rem;     /* 20px */
+    --radius-md: 0.75rem;     /* 12px */
+    --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+    --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
+    --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
+    --transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* Base Styles */
+.stApp {
+    background-color: var(--background);
+    font-family: 'Inter', sans-serif;
+}
+
+/* Fondo del contenido principal (sin sidebar) */
+/* Streamlit cambia el DOM entre versiones; forzamos en varios contenedores */
+[data-testid="stAppViewContainer"],
+[data-testid="stAppViewContainer"] .main,
+section.main,
+main,
+[data-testid="stMain"] {
+    /* Fondo del contenido (degradado blanco elegante) */
+    background: linear-gradient(180deg, rgba(255, 255, 255, 1) 0%, rgba(255, 247, 239, 1) 55%, rgba(248, 250, 252, 1) 100%) !important;
+    background-color: var(--background) !important;
+    background-image: none !important;
+}
+
+[data-testid="stAppViewContainer"] .block-container,
+section.main .block-container,
+[data-testid="stMain"] .block-container {
+    background: transparent !important;
+}
+
+h1, h2, h3, .brand-title {
+    font-family: 'Outfit', sans-serif !important;
+}
+
+.block-container {
+    padding-top: 3rem !important;
+    padding-bottom: 5rem !important;
+    max-width: 1200px;
+}
+
+/* Sidebar Styling */
+[data-testid="stSidebar"] {
+    /* Naranja con degradado sutil a blanco (brillo superior) */
+    background: linear-gradient(
+        180deg,
+        rgba(255, 255, 255, 0.22) 0%,
+        rgba(255, 255, 255, 0.08) 18%,
+        rgba(242, 140, 0, 1) 55%,
+        rgba(217, 116, 0, 1) 100%
+    ) !important;
+    background-color: rgba(242, 140, 0, 1) !important;
+    border-right: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+[data-testid="stSidebar"] .stRadio > div {
+    gap: 0.5rem;
+}
+
+[data-testid="stSidebar"] .stRadio label {
+    padding: 0.75rem 1rem !important;
+    border-radius: var(--radius-md) !important;
+    margin: 0.15rem 0 !important;
+    transition: var(--transition);
+    border: 1px solid transparent !important;
+    background-color: transparent !important;
+    color: #ffffff !important;
+}
+
+[data-testid="stSidebar"] .stRadio label:hover {
+    background-color: rgba(242, 140, 0, 0.18) !important;
+    color: #fff !important;
+}
+
+[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p,
+[data-testid="stSidebar"] .stCaptionContainer {
+    color: #ffffff !important;
+}
+
+/* Forzar que los captions de estado (Datos crudos/limpios) se vean */
+[data-testid="stSidebar"] div[data-testid="stCaptionContainer"] {
+    color: #ffffff !important;
+    font-weight: 500;
+}
+
+/* Texto de marca del sidebar en blanco intenso */
+[data-testid="stSidebar"] .brand-title,
+[data-testid="stSidebar"] .brand-subtitle {
+    color: #ffffff !important;
+}
+
+/* Brand Box (Sidebar) */
+.brand-box {
+    display: flex;
+    gap: 1rem;
+    align-items: center;
+    padding: 1.25rem;
+    border-radius: var(--radius-md);
+    /* Tarjeta de marca (naranja UCompensar, elegante) */
+    background:
+        radial-gradient(120% 140% at 0% 0%, rgba(255, 216, 160, 0.35) 0%, rgba(255, 216, 160, 0) 55%),
+        linear-gradient(135deg, rgba(242, 140, 0, 0.98) 0%, rgba(217, 116, 0, 0.96) 70%, rgba(242, 140, 0, 0.92) 140%) !important;
+    border: 1px solid rgba(255, 255, 255, 0.18) !important;
+    box-shadow: 0 10px 24px rgba(0, 0, 0, 0.28) !important;
+    margin: 1.5rem 1rem 2rem 1rem;
+    backdrop-filter: blur(10px);
+}
+
+.brand-icon {
+    font-size: 2rem;
+    filter: drop-shadow(0 0 8px rgba(255, 255, 255, 0.4));
+}
+
+.brand-title {
+    font-weight: 700;
+    font-size: 1.15rem;
+    color: #fff;
+    letter-spacing: -0.01em;
+}
+
+.brand-subtitle {
+    font-size: 0.75rem;
+    color: rgba(255, 255, 255, 0.5);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    font-weight: 600;
+}
+
+/* Cards & Containers */
+.hero-card {
+    padding: 2rem;
+    border-radius: var(--radius-lg);
+    background: var(--card);
+    border: 1px solid var(--border);
+    box-shadow: var(--shadow-md);
+    margin-bottom: 2rem;
+    position: relative;
+    overflow: hidden;
+}
+
+.hero-card::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 4px;
+    height: 100%;
+    background: linear-gradient(to bottom, var(--primary), var(--accent));
+}
+
+.hero-card h1, .hero-card h2, .hero-card h3 {
+    color: var(--text-main);
+    margin-bottom: 0.75rem;
+}
+
+.hero-card p {
+    color: var(--text-muted);
+    font-size: 1.05rem;
+    line-height: 1.6;
+}
+
+/* Metrics */
+[data-testid="stMetric"] {
+    background: var(--card) !important;
+    border: 1px solid var(--border) !important;
+    border-radius: var(--radius-md) !important;
+    padding: 1.25rem !important;
+    box-shadow: var(--shadow-sm) !important;
+    transition: var(--transition) !important;
+}
+
+[data-testid="stMetric"]:hover {
+    transform: translateY(-4px);
+    box-shadow: var(--shadow-lg) !important;
+    border-color: var(--primary-light) !important;
+}
+
+[data-testid="stMetricLabel"] {
+    font-weight: 600 !important;
+    color: var(--text-muted) !important;
+    text-transform: uppercase !important;
+    font-size: 0.75rem !important;
+    letter-spacing: 0.05em !important;
+}
+
+[data-testid="stMetricValue"] {
+    font-family: 'Outfit', sans-serif !important;
+    font-weight: 700 !important;
+    color: var(--text-main) !important;
+    font-size: 1.8rem !important;
+}
+
+/* DataFrames */
+.stDataFrame {
+    border: 1px solid var(--border) !important;
+    border-radius: var(--radius-md) !important;
+    overflow: hidden !important;
+    box-shadow: var(--shadow-sm) !important;
+}
+
+/* Buttons */
+.stButton > button {
+    border-radius: var(--radius-md) !important;
+    padding: 0.5rem 1.5rem !important;
+    font-weight: 600 !important;
+    transition: var(--transition) !important;
+    border: 1px solid var(--border) !important;
+    background-color: var(--card) !important;
+}
+
+.stButton > button:hover {
+    border-color: var(--primary) !important;
+    color: var(--primary) !important;
+    box-shadow: 0 4px 12px rgba(242, 140, 0, 0.15) !important;
+}
+
+.stButton > button[kind="primary"] {
+    background: linear-gradient(135deg, var(--primary), var(--primary-dark)) !important;
+    color: white !important;
+    border: none !important;
+}
+
+.stButton > button[kind="primary"]:hover {
+    box-shadow: 0 8px 20px rgba(242, 140, 0, 0.35) !important;
+    transform: scale(1.02);
+}
+
+/* Expander */
+.stExpander {
+    border-radius: var(--radius-md) !important;
+    border: 1px solid var(--border) !important;
+    background: var(--card) !important;
+    overflow: hidden !important;
+}
+
+/* Tab Bar */
+.stTabs [data-baseweb="tab-list"] {
+    gap: 1.5rem !important;
+    background-color: transparent !important;
+}
+
+.stTabs [data-baseweb="tab"] {
+    height: 3rem !important;
+    background-color: transparent !important;
+    border-radius: 0 !important;
+    border: none !important;
+    font-weight: 600 !important;
+    color: var(--text-muted) !important;
+}
+
+.stTabs [aria-selected="true"] {
+    color: var(--primary) !important;
+    border-bottom: 3px solid var(--primary) !important;
+}
+
+/* Oculto visual (permanece en el DOM) */
+.visually-hidden {
+    position: absolute !important;
+    width: 1px !important;
+    height: 1px !important;
+    padding: 0 !important;
+    margin: -1px !important;
+    overflow: hidden !important;
+    clip: rect(0, 0, 0, 0) !important;
+    white-space: nowrap !important;
+    border: 0 !important;
+}
+
+/* Custom Alert Styles */
+.custom-alert {
+    padding: 1rem 1.25rem;
+    border-radius: var(--radius-md);
+    margin-bottom: 1.5rem;
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    border: 1px solid transparent;
+}
+
+.alert-info {
+    background-color: #eff6ff;
+    border-color: #bfdbfe;
+    color: #1e40af;
+}
+
+/* Progress bar */
+.stProgress > div > div > div > div {
+    background-image: linear-gradient(to right, var(--primary-light), var(--primary)) !important;
+}
+
+/* Main Footer */
+.main-footer {
+    text-align: center;
+    padding: 2rem 0;
+    margin-top: 2rem;
+    border-top: 1px solid var(--border);
+}
+
