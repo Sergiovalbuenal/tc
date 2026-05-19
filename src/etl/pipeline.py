@@ -7,22 +7,38 @@ from typing import Iterable
 
 import pandas as pd
 
-from src.etl.transformations import ETLResult, build_financial_dataset
+from src.etl.transformations import ETLResult, build_financial_dataset, build_generic_dataset
+
+FINANCIAL_TYPE = "financiero"
 
 
 def run_pipeline(
     raw_df: pd.DataFrame,
     mapping: dict[str, str | None],
     *,
+    dataset_type: str = FINANCIAL_TYPE,
     default_currency: str = "USD",
     drop_invalid_rows: bool = True,
     drop_duplicates: bool = True,
 ) -> ETLResult:
-    """Punto único para limpiar datos desde las vistas."""
-    return build_financial_dataset(
+    """Punto único para limpiar datos desde las vistas.
+
+    Si el tipo es 'financiero' usa el pipeline especializado con KPIs financieros.
+    Para otros tipos (ventas, rrhh, inventario, general) usa el pipeline genérico.
+    """
+    if dataset_type == FINANCIAL_TYPE:
+        return build_financial_dataset(
+            raw_df,
+            mapping,
+            default_currency=default_currency,
+            drop_invalid_rows=drop_invalid_rows,
+            drop_duplicates=drop_duplicates,
+        )
+
+    return build_generic_dataset(
         raw_df,
         mapping,
-        default_currency=default_currency,
+        dataset_type=dataset_type,
         drop_invalid_rows=drop_invalid_rows,
         drop_duplicates=drop_duplicates,
     )

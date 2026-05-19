@@ -16,6 +16,7 @@ DEFAULTS = {
     "raw_data": None,           # Los datos tal cual vienen del Excel/CSV
     "clean_data": None,         # Los datos después de pasar por la limpieza
     "loaded_filename": None,    # El nombre del archivo que subió el usuario
+    "dataset_type": "financiero",  # Tipo detectado: financiero, ventas, rrhh, inventario, general
     "column_mapping": {},       # Cómo relacionamos las columnas del archivo con las del sistema
     "cleaning_log": [],         # Notas de qué se limpió o corrigió
     "rejected_rows": None,      # Filas que no pudimos procesar por errores
