@@ -176,8 +176,19 @@ def build_financial_dataset(
 
     df["moneda"] = df["moneda"].str.upper().str[:3]
 
-    invalid_mask = df["fecha"].isna() | df["monto_num"].isna()
+    no_fecha = df["fecha"].isna()
+    no_monto = df["monto_num"].isna()
+    invalid_mask = no_fecha | no_monto
+
+    # Preparamos razones legibles para cada fila rechazada
+    reasons = pd.Series("", index=df.index, dtype=str)
+    reasons[no_fecha & ~no_monto] = "Fecha inválida o vacía"
+    reasons[~no_fecha & no_monto] = "Monto inválido o vacío"
+    reasons[no_fecha & no_monto] = "Fecha y monto inválidos"
+
     rejected = df.loc[invalid_mask].copy()
+    if not rejected.empty:
+        rejected["_razon_rechazo"] = reasons[invalid_mask]
 
     if drop_invalid_rows:
         df = df.loc[~invalid_mask].copy()
@@ -204,4 +215,146 @@ def build_financial_dataset(
 
     log.append(f"Filas recibidas: {original_rows}. Filas listas para análisis: {len(df)}.")
 
+    return ETLResult(data=df, rejected_rows=rejected.reset_index(drop=True), log=log)
+
+
+def _detect_column_types(df: pd.DataFrame) -> dict[str, str]:
+    """Clasifica cada columna como 'fecha', 'numero' o 'texto' según su contenido."""
+    types: dict[str, str] = {}
+    for col in df.columns:
+        if col.startswith("_"):
+            continue
+        sample = df[col].dropna().head(30)
+        if sample.empty:
+            types[col] = "texto"
+            continue
+
+        # Columnas ya numéricas: no intentar parsear como fecha
+        if pd.api.types.is_numeric_dtype(df[col]):
+            types[col] = "numero"
+            continue
+
+        # Columnas ya datetime
+        if pd.api.types.is_datetime64_any_dtype(df[col]):
+            types[col] = "fecha"
+            continue
+
+        # Para columnas de texto: intentar fecha primero, luego número
+        str_sample = sample.astype(str)
+
+        # Solo intenta fecha si los valores parecen tener separadores de fecha
+        date_like = str_sample.str.contains(r"[-/\.]", regex=True).mean() >= 0.5
+        if date_like:
+            try:
+                parsed = pd.to_datetime(sample, errors="coerce")
+                if parsed.notna().mean() >= 0.6:
+                    types[col] = "fecha"
+                    continue
+            except Exception:
+                pass
+
+        # Intenta número (con símbolos de moneda, puntos, comas)
+        try:
+            numeric = sample.apply(parse_amount)
+            if numeric.notna().mean() >= 0.6:
+                types[col] = "numero"
+                continue
+        except Exception:
+            pass
+
+        types[col] = "texto"
+    return types
+
+
+def build_generic_dataset(
+    raw_df: pd.DataFrame,
+    mapping: dict[str, str | None],
+    dataset_type: str = "general",
+    *,
+    drop_invalid_rows: bool = False,
+    drop_duplicates: bool = True,
+) -> ETLResult:
+    """ETL para datasets no financieros (ventas, RRHH, inventario, general).
+
+    Detecta automáticamente columnas de fecha y numéricas, las parsea,
+    y valida los campos obligatorios según el tipo de dataset.
+    """
+    if raw_df is None or raw_df.empty:
+        return ETLResult(data=pd.DataFrame(), rejected_rows=pd.DataFrame(), log=["No había datos para limpiar."])
+
+    from src.config import DATASET_SCHEMAS
+
+    log: list[str] = []
+    schema = DATASET_SCHEMAS.get(dataset_type, DATASET_SCHEMAS["general"])
+    required_fields = schema.get("required", [])
+
+    df = raw_df.copy()
+    df["_fila_origen"] = raw_df.index + 2
+    original_rows = len(df)
+
+    # Renombrar columnas según el mapeo del usuario
+    rename_map = {
+        src: std
+        for std, src in mapping.items()
+        if src and src in df.columns and src != std
+    }
+    if rename_map:
+        df = df.rename(columns=rename_map)
+
+    # Detectar y parsear tipos de columna
+    col_types = _detect_column_types(df)
+    parsed_dates: list[str] = []
+    parsed_nums: list[str] = []
+
+    for col, ctype in col_types.items():
+        if col not in df.columns:
+            continue
+        if ctype == "fecha":
+            df[col] = parse_date_series(df[col])
+            parsed_dates.append(col)
+        elif ctype == "numero":
+            num_col = f"{col}_num" if col in df.columns else col
+            df[num_col] = df[col].apply(parse_amount)
+            parsed_nums.append(col)
+
+    if parsed_dates:
+        log.append(f"Fechas detectadas y parseadas: {', '.join(parsed_dates)}.")
+    if parsed_nums:
+        log.append(f"Columnas numéricas limpiadas: {', '.join(parsed_nums)}.")
+
+    # Validar campos obligatorios según el tipo
+    rejected_mask = pd.Series(False, index=df.index)
+    reasons = pd.Series("", index=df.index, dtype=str)
+
+    for req in required_fields:
+        if req in df.columns:
+            missing = df[req].isna() | (df[req].astype(str).str.strip() == "") | (df[req].astype(str) == "nan")
+            new_missing = missing & ~rejected_mask
+            reasons[new_missing] = f"Campo '{req}' vacío o inválido"
+            already_missing = missing & rejected_mask
+            reasons[already_missing] = reasons[already_missing] + f" + '{req}' vacío"
+            rejected_mask |= missing
+
+    rejected = df.loc[rejected_mask].copy()
+    if not rejected.empty:
+        rejected["_razon_rechazo"] = reasons[rejected_mask]
+
+    if drop_invalid_rows and not rejected.empty:
+        df = df.loc[~rejected_mask].copy()
+        log.append(f"Se quitaron {len(rejected)} filas sin campos obligatorios.")
+    elif not rejected.empty:
+        log.append(f"Hay {len(rejected)} filas con campos obligatorios vacíos.")
+
+    if drop_duplicates and not df.empty:
+        before = len(df)
+        subset_cols = [c for c in df.columns if not c.startswith("_")][:8]
+        df = df.drop_duplicates(subset=subset_cols, keep="first")
+        removed = before - len(df)
+        if removed:
+            log.append(f"Se quitaron {removed} filas duplicadas.")
+
+    if not df.empty:
+        df = df.reset_index(drop=True)
+
+    log.append(f"Filas recibidas: {original_rows}. Filas listas para análisis: {len(df)}.")
     return ETLResult(data=df, rejected_rows=rejected.reset_index(drop=True), log=log)
