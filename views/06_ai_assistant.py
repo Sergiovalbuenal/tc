@@ -151,7 +151,7 @@ def _render_compute_result(result: dict) -> None:
 def render() -> None:
     st.title("🤖 Asistente IA")
 
-    # Selector de proveedor
+    # ── Verificar proveedores ──────────────────────────────────────────────────
     available = _available_providers()
     if not available:
         st.error(
@@ -162,56 +162,82 @@ def render() -> None:
         )
         return
 
-    provider_keys = [p[0] for p in available]
-    provider_labels = [p[1] for p in available]
-    saved_provider = st.session_state.get("ai_provider", provider_keys[0])
-    default_idx = provider_keys.index(saved_provider) if saved_provider in provider_keys else 0
+    # ── Configuración (proveedor + dataset) ───────────────────────────────────
+    with st.container(border=True):
+        col_prov, col_target = st.columns([1, 1])
 
-    selected_provider = st.selectbox(
-        "Proveedor de IA",
-        options=provider_keys,
-        format_func=lambda k: dict(available).get(k, k),
-        index=default_idx,
-        key="ai_provider_selector",
-    )
-    st.session_state.ai_provider = selected_provider
+        with col_prov:
+            provider_keys = [p[0] for p in available]
+            saved_provider = st.session_state.get("ai_provider", provider_keys[0])
+            default_idx = provider_keys.index(saved_provider) if saved_provider in provider_keys else 0
+            selected_provider = st.selectbox(
+                "Proveedor de IA",
+                options=provider_keys,
+                format_func=lambda k: dict(available).get(k, k),
+                index=default_idx,
+                key="ai_provider_selector",
+            )
+            st.session_state.ai_provider = selected_provider
 
-    # Selector de dataset objetivo
-    target_opts = [("clean", "Datos limpios"), ("raw", "Datos crudos")]
-    saved_target = st.session_state.get("ai_target", "clean")
-    target_idx = 0 if saved_target == "clean" else 1
-    target = st.radio(
-        "Dataset objetivo",
-        options=[o[0] for o in target_opts],
-        format_func=lambda k: dict(target_opts)[k],
-        horizontal=True,
-        index=target_idx,
-        key="ai_target_radio",
-    )
-    st.session_state.ai_target = target
+        with col_target:
+            target_opts = [("clean", "Datos limpios"), ("raw", "Datos crudos")]
+            saved_target = st.session_state.get("ai_target", "clean")
+            target_idx = 0 if saved_target == "clean" else 1
+            target = st.radio(
+                "Dataset objetivo",
+                options=[o[0] for o in target_opts],
+                format_func=lambda k: dict(target_opts)[k],
+                horizontal=True,
+                index=target_idx,
+                key="ai_target_radio",
+            )
+            st.session_state.ai_target = target
 
+    # ── Validar datos disponibles ──────────────────────────────────────────────
     target_name, df = _get_target_df()
     if df is None or df.empty:
         if target_name == "clean":
-            st.warning("No hay datos limpios todavía. Si quieres consultar sin ETL, cambia a **Datos crudos**.")
+            st.warning("No hay datos limpios. Cambia a **Datos crudos** o ejecuta el ETL primero.")
         else:
-            st.warning("No hay datos crudos. Ve a **Cargar datos** y sube un Excel/CSV.")
+            st.warning("No hay datos crudos. Ve a **Cargar datos** y sube un archivo.")
         return
 
     profile = dataset_profile(df, max_rows_preview=15)
     kpis = calculate_kpis(df) if is_financial_schema(df) else None
 
-    with st.expander("Contexto enviado a IA (resumen)", expanded=False):
+    # Info compacta del dataset activo
+    schema_tag = "Financiero" if is_financial_schema(df) else "Genérico"
+    st.caption(
+        f"Dataset activo: **{target_name}** · {len(df):,} filas · {len(df.columns)} columnas · esquema {schema_tag}"
+    )
+
+    with st.expander("Ver contexto enviado a la IA", expanded=False):
         st.json({"dataset": target_name, "profile": profile, "kpis": kpis or "N/A"})
 
     st.session_state.setdefault("ai_keep_history", False)
     st.session_state.setdefault("ai_last_user_msg", None)
     st.session_state.setdefault("ai_last_assistant_msg", None)
 
-    keep_history = st.toggle("Guardar historial del chat", value=bool(st.session_state.ai_keep_history))
-    st.session_state.ai_keep_history = keep_history
+    # ── Controles del chat ─────────────────────────────────────────────────────
+    ctrl1, ctrl2, ctrl3 = st.columns([2, 1, 1])
+    with ctrl1:
+        keep_history = st.toggle("Guardar historial", value=bool(st.session_state.ai_keep_history))
+        st.session_state.ai_keep_history = keep_history
+    with ctrl2:
+        if st.button("Limpiar chat", use_container_width=True, key="btn_clear_chat"):
+            st.session_state.ai_chat_history = []
+            st.session_state.ai_last_user_msg = None
+            st.session_state.ai_last_assistant_msg = None
+            st.rerun()
+    with ctrl3:
+        if st.button("Limpiar resultados", use_container_width=True, key="btn_clear_results"):
+            for k in ("ai_last_proposal", "ai_preview_df", "ai_preview_chart", "ai_last_compute"):
+                st.session_state[k] = None
+            st.rerun()
 
-    # Historial de mensajes
+    st.divider()
+
+    # ── Historial de mensajes ──────────────────────────────────────────────────
     history: list[dict] = st.session_state.get("ai_chat_history", [])
     if keep_history:
         for msg in history:
@@ -226,20 +252,6 @@ def render() -> None:
         if last_asst:
             with st.chat_message("assistant"):
                 st.markdown(str(last_asst))
-
-    # Botones de control
-    c1, c2 = st.columns(2)
-    with c1:
-        if st.button("Limpiar chat", use_container_width=True, key="btn_clear_chat"):
-            st.session_state.ai_chat_history = []
-            st.session_state.ai_last_user_msg = None
-            st.session_state.ai_last_assistant_msg = None
-            st.rerun()
-    with c2:
-        if st.button("Limpiar resultados", use_container_width=True, key="btn_clear_results"):
-            for k in ("ai_last_proposal", "ai_preview_df", "ai_preview_chart", "ai_last_compute"):
-                st.session_state[k] = None
-            st.rerun()
 
     user_msg = st.chat_input("Pregunta sobre tus datos (ej: 'resume el dataset', 'gráfica de ventas por mes').")
     if user_msg:
@@ -381,55 +393,54 @@ def render() -> None:
             st.rerun()
 
     # ── Descargables ───────────────────────────────────────────────────────────
-    st.divider()
-    st.subheader("Descargables")
-    if is_financial_schema(df):
-        col_a, col_b = st.columns(2)
-        with col_a:
-            md = build_ai_markdown_report(
-                df,
-                ai_summary="(Genera un resumen con el chat y pégalo aquí si deseas).",
-                cleaning_log=st.session_state.get("cleaning_log", []),
-            )
-            st.download_button(
-                "Descargar reporte IA (Markdown)",
-                data=md.encode("utf-8"),
-                file_name="reporte_ia.md",
-                mime="text/markdown",
-                use_container_width=True,
-            )
-        with col_b:
-            st.download_button(
-                "Descargar dashboard HTML",
-                data=build_dashboard_html(df),
-                file_name="dashboard.html",
-                mime="text/html",
-                use_container_width=True,
-            )
-    else:
-        profile_for_dl = dataset_profile(df, max_rows_preview=15)
-        g1, g2, g3 = st.columns(3)
-        with g1:
-            st.download_button(
-                "Descargar CSV",
-                data=df.to_csv(index=False).encode("utf-8-sig"),
-                file_name="dataset.csv",
-                mime="text/csv",
-                use_container_width=True,
-            )
-        with g2:
-            st.download_button(
-                "Descargar resumen Markdown",
-                data=build_generic_markdown_report(df, profile_for_dl).encode("utf-8"),
-                file_name="resumen_archivo.md",
-                mime="text/markdown",
-                use_container_width=True,
-            )
-        with g3:
-            st.download_button(
-                "Descargar perfil JSON",
-                data=json.dumps(profile_for_dl, ensure_ascii=False, indent=2, default=str).encode("utf-8"),
-                file_name="perfil_dataset.json",
-                mime="application/json",
-                use_container_width=True,
-            )
+    with st.expander("Descargables", expanded=False):
+        if is_financial_schema(df):
+            col_a, col_b = st.columns(2)
+            with col_a:
+                md = build_ai_markdown_report(
+                    df,
+                    ai_summary="(Genera un resumen con el chat y pégalo aquí si deseas).",
+                    cleaning_log=st.session_state.get("cleaning_log", []),
+                )
+                st.download_button(
+                    "Descargar reporte IA (Markdown)",
+                    data=md.encode("utf-8"),
+                    file_name="reporte_ia.md",
+                    mime="text/markdown",
+                    use_container_width=True,
+                )
+            with col_b:
+                st.download_button(
+                    "Descargar dashboard HTML",
+                    data=build_dashboard_html(df),
+                    file_name="dashboard.html",
+                    mime="text/html",
+                    use_container_width=True,
+                )
+        else:
+            profile_for_dl = dataset_profile(df, max_rows_preview=15)
+            g1, g2, g3 = st.columns(3)
+            with g1:
+                st.download_button(
+                    "Descargar CSV",
+                    data=df.to_csv(index=False).encode("utf-8-sig"),
+                    file_name="dataset.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                )
+            with g2:
+                st.download_button(
+                    "Descargar resumen Markdown",
+                    data=build_generic_markdown_report(df, profile_for_dl).encode("utf-8"),
+                    file_name="resumen_archivo.md",
+                    mime="text/markdown",
+                    use_container_width=True,
+                )
+            with g3:
+                st.download_button(
+                    "Descargar perfil JSON",
+                    data=json.dumps(profile_for_dl, ensure_ascii=False, indent=2, default=str).encode("utf-8"),
+                    file_name="perfil_dataset.json",
+                    mime="application/json",
+                    use_container_width=True,
+                )
