@@ -116,7 +116,6 @@ def render_sidebar() -> str:
             <div class="brand-icon">📊</div>
             <div>
                 <div class="brand-title">Tablero de Control</div>
-                <div class="brand-subtitle">Análisis Financiero</div>
             </div>
         </div>
         """,
