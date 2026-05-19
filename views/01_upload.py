@@ -176,10 +176,8 @@ def _mapping_form(df: pd.DataFrame, dataset_type: str) -> dict[str, str | None]:
         )
         return {}
 
-    if dataset_type == "financiero":
-        guessed = _guess_mapping_for_type(df, dataset_type) if not st.session_state.get("column_mapping") else st.session_state["column_mapping"]
-    else:
-        guessed = _guess_mapping_for_type(df, dataset_type)
+    # Siempre usar el mapeo guardado en session_state (ya fue sembrado con _seed_mapping_widgets)
+    guessed = st.session_state.get("column_mapping") or _guess_mapping_for_type(df, dataset_type)
 
     options = get_column_options(df)
     mapping: dict[str, str | None] = {}
@@ -233,6 +231,24 @@ def _mapping_form(df: pd.DataFrame, dataset_type: str) -> dict[str, str | None]:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
+# Gestión de estados de widgets
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _clear_mapping_widgets() -> None:
+    """Elimina los valores guardados de los widgets de mapeo para que se recalculen."""
+    keys_to_delete = [k for k in st.session_state if k.startswith("mapping_")]
+    for key in keys_to_delete:
+        del st.session_state[key]
+
+
+def _seed_mapping_widgets(dataset_type: str, mapping: dict[str, str | None]) -> None:
+    """Pre-carga los valores correctos en los widgets de mapeo antes de renderizar."""
+    for field_key, col_value in mapping.items():
+        widget_key = f"mapping_{dataset_type}_{field_key}"
+        st.session_state[widget_key] = col_value if col_value is not None else "No usar"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Vista principal
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -264,8 +280,11 @@ def render() -> None:
         st.session_state.loaded_filename = "datos_ejemplo.csv"
         st.session_state.column_mapping = mapping
         st.session_state.dataset_type = "financiero"
+        st.session_state["dataset_type_selector"] = "financiero"
         st.session_state.auto_run_etl = True
         st.session_state.clean_data = None
+        _clear_mapping_widgets()
+        _seed_mapping_widgets("financiero", mapping)
         st.rerun()
 
     if uploaded_file is not None:
@@ -283,8 +302,12 @@ def render() -> None:
             st.session_state.dataset_type = dtype
             st.session_state.column_mapping = mapping
             st.session_state.clean_data = None
-            # Forzar sincronización del widget selectbox con el tipo detectado
+            # Sincronizar el widget del selectbox de tipo
             st.session_state["dataset_type_selector"] = dtype
+            # Limpiar los widgets de mapeo anteriores para que tomen los nuevos valores
+            _clear_mapping_widgets()
+            # Pre-cargar los valores correctos en los widgets de mapeo
+            _seed_mapping_widgets(dtype, mapping)
             st.success(
                 f"✅ **{uploaded_file.name}** cargado — "
                 f"{len(df):,} filas, {len(df.columns)} columnas."
@@ -302,15 +325,18 @@ def render() -> None:
     detected_for_banner = detect_dataset_type(raw_df)
     selected_type = _render_detection_banner(detected_for_banner)
 
-    # Si el usuario cambia el tipo manualmente, recalcular el mapeo
+    # Si el usuario cambia el tipo manualmente, recalcular el mapeo y limpiar widgets
     if selected_type != st.session_state.get("dataset_type"):
-        st.session_state.dataset_type = selected_type
-        st.session_state.column_mapping = (
+        new_mapping = (
             guess_column_mapping(raw_df)
             if selected_type == "financiero"
             else _guess_mapping_for_type(raw_df, selected_type)
         )
+        st.session_state.dataset_type = selected_type
+        st.session_state.column_mapping = new_mapping
         st.session_state.clean_data = None
+        _clear_mapping_widgets()
+        _seed_mapping_widgets(selected_type, new_mapping)
         st.rerun()
 
     st.divider()
