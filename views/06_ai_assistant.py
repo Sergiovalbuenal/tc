@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Vista: Asistente IA (Gemini)."""
+"""Vista: Asistente IA (Gemini / Claude)."""
 
 from __future__ import annotations
 
@@ -8,7 +8,6 @@ import json
 import pandas as pd
 import streamlit as st
 
-from src.ai.gemini_client import GeminiClient
 from src.ai.tools import (
     apply_filter_spec,
     apply_transform_spec,
@@ -44,7 +43,7 @@ Reglas:
     cada regla: {"column":"nombre","op":"eq|ne|contains|in|gte|lte|notna","value":...}
     para "in", value debe ser lista de strings.
 - Si pide gráfica:
-  - financial: puedes usar proposal {"kind":"chart","spec":{"chart":"monthly_result|...", "limit":10}}
+  - financial: puedes usar proposal {"kind":"chart","spec":{"chart":"monthly_result|cashflow_cumulative|donut_tipo|weekday|bar_categoria_egresos|bar_categoria_ingresos", "limit":10}}
   - generic: usa proposal {"kind":"chart","spec":{"kind":"bar"|"line","x":"columna_x","y":"columna_y","agg":"sum"|"mean","title":"..."}}
     x e y deben existir en `profile.columns`; y debe estar en `numeric_columns` o ser convertible a número.
 - Si pide métricas (máximo, suma, conteos, top): `kind` = "compute" con `compute`:
@@ -52,15 +51,47 @@ Reglas:
 
 Kinds permitidos: answer, propose_filter, propose_transform, propose_chart, compute, summary.
 
-Formato:
+Formato de respuesta (siempre JSON válido):
 {
   "kind": "...",
-  "message": "texto para el usuario",
+  "message": "texto claro para el usuario",
   "proposal": { ... },
   "compute": { ... }
 }
 """
 
+
+# ── Proveedores disponibles ────────────────────────────────────────────────────
+
+def _available_providers() -> list[tuple[str, str]]:
+    """Retorna lista de (key, label) para los proveedores configurados."""
+    providers: list[tuple[str, str]] = []
+    try:
+        from src.ai.gemini_client import GeminiProvider
+        if GeminiProvider.is_available():
+            providers.append(("gemini", GeminiProvider.display_name()))
+    except Exception as e:  # noqa: BLE001
+        st.caption(f"⚠️ Gemini no cargó: `{e}`")
+    try:
+        from src.ai.claude_client import ClaudeProvider
+        if ClaudeProvider.is_available():
+            providers.append(("claude", ClaudeProvider.display_name()))
+    except Exception as e:  # noqa: BLE001
+        st.caption(f"⚠️ Claude no cargó: `{e}`")
+    return providers
+
+
+def _build_provider(key: str):
+    if key == "gemini":
+        from src.ai.gemini_client import GeminiProvider
+        return GeminiProvider()
+    if key == "claude":
+        from src.ai.claude_client import ClaudeProvider
+        return ClaudeProvider()
+    raise ValueError(f"Proveedor desconocido: {key}")
+
+
+# ── Helpers ────────────────────────────────────────────────────────────────────
 
 def _get_target_df() -> tuple[str, pd.DataFrame | None]:
     target = st.session_state.get("ai_target", "clean")
@@ -78,53 +109,83 @@ def _set_target_df(target: str, df: pd.DataFrame) -> None:
 
 def _safe_json_parse(text: str) -> dict:
     text = text.strip()
-    # 1) Si viene en bloque ```...```, lo extraemos.
     if "```" in text:
         parts = text.split("```")
-        # Preferimos el contenido dentro del primer bloque fenced.
         if len(parts) >= 2:
-            candidate = parts[1]
-            candidate = candidate.removeprefix("json").removeprefix("JSON").strip()
+            candidate = parts[1].removeprefix("json").removeprefix("JSON").strip()
             text = candidate
-
-    # 2) Intentamos extraer el primer objeto JSON aunque venga con texto extra.
     start = text.find("{")
     end = text.rfind("}")
     if start != -1 and end != -1 and end > start:
-        text = text[start : end + 1]
-
+        text = text[start: end + 1]
     return json.loads(text)
 
-def _auth_supported() -> bool:
-    return hasattr(st, "user") and hasattr(st, "login") and hasattr(st, "logout")
+
+def _render_compute_result(result: dict) -> None:
+    """Muestra el resultado de un cálculo como tabla cuando es posible."""
+    op = result.get("op", "")
+    if "top" in result:
+        rows = result["top"]
+        if rows:
+            st.dataframe(pd.DataFrame(rows), use_container_width=True)
+            return
+    if op in {"max", "min", "sum", "mean"}:
+        col_name = result.get("column", "valor")
+        val = result.get("value")
+        st.metric(f"{op.upper()} — {col_name}", f"{val:,.4g}" if isinstance(val, float) else val)
+        row = result.get("row")
+        if row:
+            st.dataframe(pd.DataFrame([row]), use_container_width=True)
+        return
+    if op in {"nunique", "count_rows"}:
+        st.metric(op, result.get("value"))
+        return
+    # Fallback: mostrar como JSON (solo campos técnicos, no todo)
+    st.json({k: v for k, v in result.items() if k != "op"})
 
 
-def _is_logged_in() -> bool:
-    user = getattr(st, "user", None)
-    if user is None:
-        return False
-    return bool(getattr(user, "is_logged_in", False))
-
+# ── Vista principal ────────────────────────────────────────────────────────────
 
 def render() -> None:
-    st.title("🤖 Asistente IA (Gemini)")
+    st.title("🤖 Asistente IA")
 
-    # Auth es opcional: si existe y está configurado, se muestra botón.
-    # Si no existe o falla, igual dejamos usar la IA (modo simple).
-    if _auth_supported() and not _is_logged_in():
-        with st.expander("Acceso (opcional)", expanded=False):
-            st.caption("Puedes iniciar sesión con Google, pero no es obligatorio para usar la IA en este modo.")
-            if st.button("Iniciar sesión con Google"):
-                st.login()
+    # Selector de proveedor
+    available = _available_providers()
+    if not available:
+        st.error(
+            "No hay ningún proveedor de IA configurado.\n\n"
+            "Agrega tu clave API en `.streamlit/secrets.toml` o como variable de entorno:\n"
+            "- **Gemini**: `GEMINI_API_KEY = \"tu-clave\"`\n"
+            "- **Claude**: `ANTHROPIC_API_KEY = \"tu-clave\"`"
+        )
+        return
+
+    provider_keys = [p[0] for p in available]
+    provider_labels = [p[1] for p in available]
+    saved_provider = st.session_state.get("ai_provider", provider_keys[0])
+    default_idx = provider_keys.index(saved_provider) if saved_provider in provider_keys else 0
+
+    selected_provider = st.selectbox(
+        "Proveedor de IA",
+        options=provider_keys,
+        format_func=lambda k: dict(available).get(k, k),
+        index=default_idx,
+        key="ai_provider_selector",
+    )
+    st.session_state.ai_provider = selected_provider
 
     # Selector de dataset objetivo
+    target_opts = [("clean", "Datos limpios"), ("raw", "Datos crudos")]
+    saved_target = st.session_state.get("ai_target", "clean")
+    target_idx = 0 if saved_target == "clean" else 1
     target = st.radio(
         "Dataset objetivo",
-        options=[("clean", "Datos limpios"), ("raw", "Datos crudos")],
-        format_func=lambda x: x[1],
+        options=[o[0] for o in target_opts],
+        format_func=lambda k: dict(target_opts)[k],
         horizontal=True,
-        index=0 if st.session_state.get("ai_target", "clean") == "clean" else 1,
-    )[0]
+        index=target_idx,
+        key="ai_target_radio",
+    )
     st.session_state.ai_target = target
 
     target_name, df = _get_target_df()
@@ -135,35 +196,26 @@ def render() -> None:
             st.warning("No hay datos crudos. Ve a **Cargar datos** y sube un Excel/CSV.")
         return
 
-    # contexto compacto para la IA (no mandamos todo el df)
     profile = dataset_profile(df, max_rows_preview=15)
     kpis = calculate_kpis(df) if is_financial_schema(df) else None
 
     with st.expander("Contexto enviado a IA (resumen)", expanded=False):
-        st.json(
-            {
-                "dataset": target_name,
-                "profile": profile,
-                "kpis": kpis if kpis else "N/A (solo si el dataset ya tiene estructura financiera)",
-            }
-        )
+        st.json({"dataset": target_name, "profile": profile, "kpis": kpis or "N/A"})
 
-    if "ai_keep_history" not in st.session_state:
-        st.session_state.ai_keep_history = False
+    st.session_state.setdefault("ai_keep_history", False)
     st.session_state.setdefault("ai_last_user_msg", None)
     st.session_state.setdefault("ai_last_assistant_msg", None)
 
     keep_history = st.toggle("Guardar historial del chat", value=bool(st.session_state.ai_keep_history))
     st.session_state.ai_keep_history = keep_history
 
-    # Mostrar historial (si aplica)
-    history = st.session_state.get("ai_chat_history", [])
+    # Historial de mensajes
+    history: list[dict] = st.session_state.get("ai_chat_history", [])
     if keep_history:
         for msg in history:
             with st.chat_message(msg["role"]):
                 st.markdown(msg["content"])
     else:
-        # Sin historial, al menos mostramos el último intercambio para evitar “parpadeo”
         last_user = st.session_state.get("ai_last_user_msg")
         last_asst = st.session_state.get("ai_last_assistant_msg")
         if last_user:
@@ -173,89 +225,93 @@ def render() -> None:
             with st.chat_message("assistant"):
                 st.markdown(str(last_asst))
 
-    # Controles rápidos
-    top_left, top_right = st.columns([1, 1])
-    with top_left:
-        if st.button("Limpiar chat", use_container_width=True):
+    # Botones de control
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("Limpiar chat", use_container_width=True, key="btn_clear_chat"):
             st.session_state.ai_chat_history = []
+            st.session_state.ai_last_user_msg = None
+            st.session_state.ai_last_assistant_msg = None
             st.rerun()
-    with top_right:
-        if st.button("Limpiar resultados", use_container_width=True):
-            st.session_state.ai_last_proposal = None
-            st.session_state.ai_preview_df = None
-            st.session_state.ai_preview_chart = None
-            st.session_state.ai_last_compute = None
+    with c2:
+        if st.button("Limpiar resultados", use_container_width=True, key="btn_clear_results"):
+            for k in ("ai_last_proposal", "ai_preview_df", "ai_preview_chart", "ai_last_compute"):
+                st.session_state[k] = None
             st.rerun()
 
-    user_msg = st.chat_input("Pregunta por tus datos (ej: 'resume el mes con más egresos', 'filtra COP y abril').")
+    user_msg = st.chat_input("Pregunta sobre tus datos (ej: 'resume el dataset', 'gráfica de ventas por mes').")
     if user_msg:
-        # Cada nueva pregunta reemplaza el panel de resultados (evita que se quede pegado lo anterior)
-        st.session_state.ai_last_proposal = None
-        st.session_state.ai_preview_df = None
-        st.session_state.ai_preview_chart = None
-        st.session_state.ai_last_compute = None
+        for k in ("ai_last_proposal", "ai_preview_df", "ai_preview_chart", "ai_last_compute"):
+            st.session_state[k] = None
         st.session_state.ai_last_user_msg = user_msg
         st.session_state.ai_last_assistant_msg = None
 
         if keep_history:
             history.append({"role": "user", "content": user_msg})
             st.session_state.ai_chat_history = history
+
         with st.chat_message("user"):
             st.markdown(user_msg)
 
         try:
-            client = GeminiClient()
+            provider = _build_provider(selected_provider)
         except Exception as exc:  # noqa: BLE001
             st.error(str(exc))
             st.stop()
+
         user_context = {
             "dataset": target_name,
             "profile": profile,
             "kpis": kpis,
             "question": user_msg,
         }
-        # El profile puede contener Timestamps/NaN; serializamos de forma segura.
+
+        messages_to_send: list[dict] = []
+        if keep_history:
+            # Incluir historial previo sin el mensaje actual (ya estará al final)
+            messages_to_send = [m for m in history if m != {"role": "user", "content": user_msg}]
+        messages_to_send.append({
+            "role": "user",
+            "content": json.dumps(user_context, ensure_ascii=False, default=str),
+        })
+
         try:
-            raw = client.generate_text(
+            raw = provider.generate(
                 system=SYSTEM_PROMPT,
-                user=json.dumps(user_context, ensure_ascii=False, default=str),
+                messages=messages_to_send,
+                max_tokens=4096,
+                temperature=0.2,
             )
         except Exception as exc:  # noqa: BLE001
-            err = str(exc)
+            err_text = str(exc)
             with st.chat_message("assistant"):
                 st.warning(
-                    "**Gemini no está disponible ahora mismo** (saturación temporal en Google, error 503/429).\n\n"
-                    "Prueba de nuevo en 1–2 minutos. Si pasa seguido, en `secrets.toml` o variables de entorno pon:\n"
-                    "`GEMINI_MODEL=gemini-2.0-flash` (u otro modelo que tengas habilitado).\n\n"
-                    f"Detalle: `{err[:400]}`"
+                    f"**{dict(available).get(selected_provider, selected_provider)} no está disponible ahora mismo.**\n\n"
+                    f"Verifica que la clave API esté configurada correctamente.\n\n"
+                    f"Detalle: `{err_text[:400]}`"
                 )
-            st.session_state.ai_last_assistant_msg = (
-                "Gemini no disponible temporalmente (503). Reintenta en un momento."
-            )
+            st.session_state.ai_last_assistant_msg = f"Error: {err_text[:200]}"
             st.stop()
 
         try:
             payload = _safe_json_parse(raw)
         except Exception:  # noqa: BLE001
-            # Si Gemini no devolvió JSON bien formado, igual mostramos el texto al usuario.
             payload = {"kind": "answer", "message": raw, "proposal": None}
 
         kind = payload.get("kind", "answer")
         message = payload.get("message", "")
         compute_spec = payload.get("compute")
 
-        # Render assistant message
         with st.chat_message("assistant"):
             st.markdown(message if message else "Listo.")
 
-        st.session_state.ai_last_assistant_msg = message if message else "Listo."
+        reply = message if message else "Listo."
+        st.session_state.ai_last_assistant_msg = reply
         if keep_history:
-            history.append({"role": "assistant", "content": message if message else "Listo."})
+            history.append({"role": "assistant", "content": reply})
             st.session_state.ai_chat_history = history
 
-        # Aceptamos dos formatos:
-        # 1) payload.proposal = {"kind": "...", "spec": {...}}
-        # 2) payload.kind = "propose_*" y payload contiene {"spec": {...}} directamente (Gemini a veces lo hace)
+        # Normalizar propuesta (Gemini a veces la pone directamente en el payload)
         proposal = payload.get("proposal")
         if not isinstance(proposal, dict) and isinstance(kind, str) and kind.startswith("propose_"):
             implied = kind.replace("propose_", "", 1)
@@ -276,54 +332,55 @@ def render() -> None:
 
         if isinstance(compute_spec, dict):
             st.session_state.ai_last_compute = compute_spec
-        # No forzamos rerun: evita que desaparezcan mensajes cuando no hay historial.
 
-    # Panel de propuesta (si existe)
+    # ── Panel de propuesta (filtro / transformación) ───────────────────────────
     proposal_dict = st.session_state.get("ai_last_proposal")
     preview_df = st.session_state.get("ai_preview_df")
     preview_chart = st.session_state.get("ai_preview_chart")
     compute_spec = st.session_state.get("ai_last_compute")
 
     if proposal_dict and isinstance(preview_df, pd.DataFrame):
-        st.subheader("Propuesta de IA (requiere confirmación)")
-        st.json(proposal_dict)
+        st.subheader("Vista previa de la propuesta")
+        st.caption(f"Tipo: **{proposal_dict.get('kind', '—')}** | {len(preview_df):,} filas resultantes")
         st.dataframe(preview_df.head(100), use_container_width=True)
 
         col1, col2 = st.columns(2)
         with col1:
-            if st.button("Aplicar cambios", type="primary", use_container_width=True):
+            if st.button("✅ Aplicar cambios", type="primary", use_container_width=True, key="btn_apply"):
                 _set_target_df(target_name, preview_df)
                 st.session_state.ai_last_proposal = None
                 st.session_state.ai_preview_df = None
-                st.success("Cambios aplicados.")
+                st.success("Cambios aplicados al dataset.")
                 st.rerun()
         with col2:
-            if st.button("Descartar", use_container_width=True):
+            if st.button("❌ Descartar", use_container_width=True, key="btn_discard"):
                 st.session_state.ai_last_proposal = None
                 st.session_state.ai_preview_df = None
                 st.info("Propuesta descartada.")
                 st.rerun()
 
+    # ── Gráfica propuesta ──────────────────────────────────────────────────────
     if proposal_dict and proposal_dict.get("kind") == "chart" and isinstance(preview_chart, dict):
-        st.subheader("Gráfica propuesta por la IA")
-        st.json(proposal_dict)
+        st.subheader("Gráfica generada por la IA")
         fig = build_chart(df, preview_chart)
         st.plotly_chart(fig, use_container_width=True)
-        if st.button("Descartar gráfica"):
+        if st.button("Cerrar gráfica", key="btn_close_chart"):
             st.session_state.ai_last_proposal = None
             st.session_state.ai_preview_chart = None
             st.rerun()
 
+    # ── Resultado de cálculo ───────────────────────────────────────────────────
     if isinstance(compute_spec, dict):
-        st.subheader("Cálculo (resultado)")
+        st.subheader("Resultado del cálculo")
         result = run_compute(df, compute_spec)
-        st.json(result)
-        if st.button("Limpiar resultado"):
+        _render_compute_result(result)
+        if st.button("Limpiar resultado", key="btn_clear_compute"):
             st.session_state.ai_last_compute = None
             st.rerun()
 
+    # ── Descargables ───────────────────────────────────────────────────────────
     st.divider()
-    st.subheader("Descargables (con dataset actual)")
+    st.subheader("Descargables")
     if is_financial_schema(df):
         col_a, col_b = st.columns(2)
         with col_a:
@@ -348,10 +405,11 @@ def render() -> None:
                 use_container_width=True,
             )
     else:
+        profile_for_dl = dataset_profile(df, max_rows_preview=15)
         g1, g2, g3 = st.columns(3)
         with g1:
             st.download_button(
-                "Descargar CSV (datos actuales)",
+                "Descargar CSV",
                 data=df.to_csv(index=False).encode("utf-8-sig"),
                 file_name="dataset.csv",
                 mime="text/csv",
@@ -360,7 +418,7 @@ def render() -> None:
         with g2:
             st.download_button(
                 "Descargar resumen Markdown",
-                data=build_generic_markdown_report(df, profile).encode("utf-8"),
+                data=build_generic_markdown_report(df, profile_for_dl).encode("utf-8"),
                 file_name="resumen_archivo.md",
                 mime="text/markdown",
                 use_container_width=True,
@@ -368,9 +426,8 @@ def render() -> None:
         with g3:
             st.download_button(
                 "Descargar perfil JSON",
-                data=json.dumps(profile, ensure_ascii=False, indent=2, default=str).encode("utf-8"),
+                data=json.dumps(profile_for_dl, ensure_ascii=False, indent=2, default=str).encode("utf-8"),
                 file_name="perfil_dataset.json",
                 mime="application/json",
                 use_container_width=True,
             )
-

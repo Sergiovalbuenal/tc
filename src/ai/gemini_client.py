@@ -1,40 +1,37 @@
+# -*- coding: utf-8 -*-
+"""Proveedor Gemini (google-genai >= 0.8)."""
+
 from __future__ import annotations
 
 import os
 import time
-from dataclasses import dataclass
+
+from src.ai.base_provider import BaseAIProvider
 
 try:
-    # SDK oficial (google-genai). La forma recomendada en docs es: from google import genai
     from google import genai  # type: ignore
 except Exception:  # noqa: BLE001
     genai = None  # type: ignore[assignment]
 
-
-@dataclass(frozen=True)
-class GeminiConfig:
-    model: str = "gemini-2.5-flash"
-    temperature: float = 0.2
-    max_output_tokens: int = 1024
+try:
+    from google.genai import types as genai_types  # type: ignore
+except Exception:  # noqa: BLE001
+    genai_types = None  # type: ignore[assignment]
 
 
-def _default_fallback_models() -> list[str]:
-    return [
-        os.getenv("GEMINI_MODEL_FALLBACK", "gemini-2.0-flash"),
-        "gemini-2.0-flash",
-        "gemini-1.5-flash",
-    ]
-
-
-def _is_retryable_error(exc: BaseException) -> bool:
-    text = str(exc).lower()
-    if "503" in text or "unavailable" in text:
-        return True
-    if "429" in text or "resource exhausted" in text or "rate limit" in text:
-        return True
-    if "500" in text or "internal" in text:
-        return True
-    return False
+def _load_api_key() -> str | None:
+    key = os.getenv("GEMINI_API_KEY")
+    if key:
+        return key
+    try:
+        import streamlit as st  # type: ignore
+        if "GEMINI_API_KEY" in st.secrets:
+            return str(st.secrets["GEMINI_API_KEY"])
+        if "gemini" in st.secrets and "api_key" in st.secrets["gemini"]:
+            return str(st.secrets["gemini"]["api_key"])
+    except Exception:  # noqa: BLE001
+        pass
+    return None
 
 
 def _load_model_name() -> str:
@@ -42,7 +39,6 @@ def _load_model_name() -> str:
         return name.strip()
     try:
         import streamlit as st  # type: ignore
-
         if "GEMINI_MODEL" in st.secrets:
             return str(st.secrets["GEMINI_MODEL"]).strip()
         if "gemini" in st.secrets and "model" in st.secrets["gemini"]:
@@ -52,47 +48,80 @@ def _load_model_name() -> str:
     return "gemini-2.5-flash"
 
 
-class GeminiClient:
-    def __init__(self, *, api_key: str | None = None, config: GeminiConfig | None = None) -> None:
+def _is_retryable_error(exc: BaseException) -> bool:
+    text = str(exc).lower()
+    return any(kw in text for kw in ("503", "unavailable", "429", "resource exhausted", "rate limit", "500", "internal"))
+
+
+def _fallback_models(primary: str) -> list[str]:
+    candidates = [primary, os.getenv("GEMINI_MODEL_FALLBACK", ""), "gemini-2.0-flash", "gemini-1.5-flash"]
+    seen: list[str] = []
+    for m in candidates:
+        if m and m not in seen:
+            seen.append(m)
+    return seen
+
+
+class GeminiProvider(BaseAIProvider):
+    """Proveedor Gemini implementando BaseAIProvider."""
+
+    def __init__(self, *, api_key: str | None = None) -> None:
         if genai is None:
             raise RuntimeError(
-                "No se encontró el SDK de Gemini. Instala dependencias en el entorno activo:\n"
-                "  pip install -r requirements.txt\n"
-                "Asegúrate de estar usando la .venv correcta."
+                "SDK de Gemini no encontrado. Ejecuta: pip install -r requirements.txt"
             )
-        api_key = api_key or _load_api_key()
-        if not api_key:
-            raise RuntimeError(
-                "Falta configurar GEMINI_API_KEY (variable de entorno) para usar el asistente IA."
-            )
-        self._client = genai.Client(api_key=api_key)
-        base = config or GeminiConfig()
-        primary = _load_model_name()
-        self._config = GeminiConfig(
-            model=primary,
-            temperature=base.temperature,
-            max_output_tokens=base.max_output_tokens,
-        )
+        key = api_key or _load_api_key()
+        if not key:
+            raise RuntimeError("Falta GEMINI_API_KEY en variables de entorno o secrets.toml.")
+        self._client = genai.Client(api_key=key)
+        self._model = _load_model_name()
 
-    def generate_text(self, *, system: str, user: str) -> str:
-        models_to_try = [self._config.model]
-        for fb in _default_fallback_models():
-            if fb and fb not in models_to_try:
-                models_to_try.append(fb)
+    @classmethod
+    def is_available(cls) -> bool:
+        if genai is None:
+            return False
+        return bool(_load_api_key())
+
+    @classmethod
+    def display_name(cls) -> str:
+        return "Gemini (Google)"
+
+    def generate(
+        self,
+        *,
+        system: str,
+        messages: list[dict],
+        max_tokens: int = 4096,
+        temperature: float = 0.2,
+    ) -> str:
+        # Convertir historial al formato de google-genai: role "user"/"model"
+        contents = []
+        for msg in messages:
+            role = "model" if msg["role"] == "assistant" else "user"
+            contents.append({"role": role, "parts": [{"text": msg["content"]}]})
+
+        if genai_types is not None:
+            config = genai_types.GenerateContentConfig(
+                system_instruction=system,
+                temperature=temperature,
+                max_output_tokens=max_tokens,
+            )
+        else:
+            # Fallback para versiones del SDK sin types
+            config = {
+                "system_instruction": system,
+                "temperature": temperature,
+                "max_output_tokens": max_tokens,
+            }
 
         last_error: BaseException | None = None
-        for model_name in models_to_try:
-            for attempt in range(5):
+        for model_name in _fallback_models(self._model):
+            for attempt in range(4):
                 try:
                     response = self._client.models.generate_content(
                         model=model_name,
-                        contents=[
-                            {"role": "user", "parts": [{"text": f"{system}\n\n{user}"}]},
-                        ],
-                        config={
-                            "temperature": self._config.temperature,
-                            "max_output_tokens": self._config.max_output_tokens,
-                        },
+                        contents=contents,
+                        config=config,
                     )
                     text = getattr(response, "text", None)
                     if not text:
@@ -100,41 +129,24 @@ class GeminiClient:
                     return text
                 except Exception as exc:  # noqa: BLE001
                     last_error = exc
-                    if _is_retryable_error(exc) and attempt < 4:
-                        time.sleep(1.2 * (2**attempt))
+                    if _is_retryable_error(exc) and attempt < 3:
+                        time.sleep(1.5 * (2 ** attempt))
                         continue
                     if _is_retryable_error(exc):
-                        break  # siguiente modelo
+                        break  # probar siguiente modelo
                     raise
-        if last_error:
-            raise RuntimeError(
-                "Gemini no respondió (servicio saturado o error temporal). "
-                "Es el error 503/429 de Google: espera 1–2 minutos y vuelve a intentar. "
-                "Opcional: define `GEMINI_MODEL=gemini-2.0-flash` en el entorno o en secrets. "
-                f"Detalle: {last_error}"
-            ) from last_error
-        raise RuntimeError("Gemini no respondió.")
+
+        raise RuntimeError(
+            "Gemini no respondió (503/429 — servicio saturado). "
+            "Espera 1-2 minutos o define GEMINI_MODEL=gemini-2.0-flash. "
+            f"Detalle: {last_error}"
+        ) from last_error
 
 
-def _load_api_key() -> str | None:
-    # 1) variable de entorno
-    key = os.getenv("GEMINI_API_KEY")
-    if key:
-        return key
-
-    # 2) Streamlit secrets (recomendado para demos sin tocar el entorno)
-    try:
-        import streamlit as st  # type: ignore
-    except Exception:  # noqa: BLE001
-        return None
-
-    try:
-        if "GEMINI_API_KEY" in st.secrets:
-            return str(st.secrets["GEMINI_API_KEY"])
-        if "gemini" in st.secrets and "api_key" in st.secrets["gemini"]:
-            return str(st.secrets["gemini"]["api_key"])
-    except Exception:  # noqa: BLE001
-        return None
-
-    return None
-
+# Alias de compatibilidad con el código existente que usaba GeminiClient
+class GeminiClient(GeminiProvider):
+    def generate_text(self, *, system: str, user: str) -> str:
+        return self.generate(
+            system=system,
+            messages=[{"role": "user", "content": user}],
+        )
