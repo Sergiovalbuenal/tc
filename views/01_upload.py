@@ -14,11 +14,118 @@ from src.utils.sample_data import build_sample_data
 from src.utils.validators import validate_mapping
 
 
-def _render_detection_banner(detected: DetectionResult) -> str:
-    """Muestra el tipo detectado y permite que el usuario lo cambie.
+# ──────────────────────────────────────────────────────────────────────────────
+# Auto-mapeo inteligente
+# ──────────────────────────────────────────────────────────────────────────────
 
-    Devuelve el tipo seleccionado (puede ser diferente al detectado si el usuario lo cambió).
+# Qué tipo de dato esperamos para cada campo estándar:
+# "num" = numérico, "date" = fecha, "text" = texto/categoría
+_FIELD_DATA_TYPE: dict[str, str] = {
+    # Financiero
+    "monto": "num", "fecha": "date", "tipo": "text", "categoria": "text",
+    "subcategoria": "text", "cuenta": "text", "descripcion": "text", "moneda": "text",
+    # Ventas
+    "total": "num", "cantidad": "num", "precio": "num",
+    "producto": "text", "cliente": "text", "vendedor": "text", "region": "text", "estado": "text",
+    # RRHH
+    "salario": "num", "fecha_ingreso": "date",
+    "nombre": "text", "cargo": "text", "departamento": "text", "genero": "text", "sede": "text",
+    # Inventario
+    "stock": "num",
+    "bodega": "text", "proveedor": "text",
+}
+
+
+def _guess_mapping_for_type(df: pd.DataFrame, dataset_type: str) -> dict[str, str | None]:
+    """Auto-detecta el mapeo de columnas en dos pasadas.
+
+    Pasada 1: coincidencia exacta / parcial por nombre de columna.
+    Pasada 2: si queda un campo sin mapear, usa el tipo de dato de la columna como
+              criterio de desempate (número → salario/monto, fecha → fecha_ingreso, etc.).
     """
+    from src.utils.file_loader import normalize_name
+
+    schema = DATASET_SCHEMAS.get(dataset_type, {})
+    aliases_by_field = schema.get("aliases", {})
+    columns = list(df.columns)
+    normalized_cols = {normalize_name(col): col for col in columns}
+
+    mapping: dict[str, str | None] = {}
+    used_cols: set[str] = set()
+
+    # ── Pasada 1: nombre ─────────────────────────────────────────────────────
+    for field_key, aliases in aliases_by_field.items():
+        match = None
+        # Exacto
+        for alias in aliases:
+            if normalize_name(alias) in normalized_cols:
+                match = normalized_cols[normalize_name(alias)]
+                break
+        # Parcial (el alias está contenido en el nombre de columna)
+        if match is None:
+            for col in columns:
+                norm_col = normalize_name(col)
+                if any(normalize_name(a) in norm_col for a in aliases):
+                    match = col
+                    break
+        if match:
+            mapping[field_key] = match
+            used_cols.add(match)
+        else:
+            mapping[field_key] = None
+
+    # ── Pasada 2: tipo de dato como fallback ─────────────────────────────────
+    # Clasificamos las columnas no mapeadas por su dtype
+    unmapped_num = [
+        c for c in columns
+        if c not in used_cols and pd.api.types.is_numeric_dtype(df[c])
+    ]
+    unmapped_date = [
+        c for c in columns
+        if c not in used_cols and pd.api.types.is_datetime64_any_dtype(df[c])
+    ]
+    # Para texto tomamos object con pocos únicos (categorías) o muchos (texto libre)
+    unmapped_text = [
+        c for c in columns
+        if c not in used_cols
+        and not pd.api.types.is_numeric_dtype(df[c])
+        and not pd.api.types.is_datetime64_any_dtype(df[c])
+    ]
+
+    # También intentamos columnas object que parezcan fechas
+    unmapped_datelike = [
+        c for c in unmapped_text
+        if df[c].dropna().astype(str).str.contains(r"[-/\.]", regex=True).mean() > 0.5
+    ]
+
+    for field_key, current_val in mapping.items():
+        if current_val is not None:
+            continue  # Ya tiene mapeo, no tocar
+        expected_dtype = _FIELD_DATA_TYPE.get(field_key, "text")
+
+        if expected_dtype == "num" and unmapped_num:
+            mapping[field_key] = unmapped_num.pop(0)
+            used_cols.add(mapping[field_key])
+        elif expected_dtype == "date" and unmapped_date:
+            mapping[field_key] = unmapped_date.pop(0)
+            used_cols.add(mapping[field_key])
+        elif expected_dtype == "date" and unmapped_datelike:
+            mapping[field_key] = unmapped_datelike.pop(0)
+            unmapped_text.remove(mapping[field_key])
+            used_cols.add(mapping[field_key])
+        elif expected_dtype == "text" and unmapped_text:
+            mapping[field_key] = unmapped_text.pop(0)
+            used_cols.add(mapping[field_key])
+
+    return mapping
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Componentes de UI
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _render_detection_banner(detected: DetectionResult) -> str:
+    """Muestra el tipo detectado y devuelve el tipo seleccionado por el usuario."""
     type_options = {k: f"{v['icon']} {v['label']}" for k, v in DATASET_SCHEMAS.items()}
     current = st.session_state.get("dataset_type", detected.dataset_type)
 
@@ -36,7 +143,7 @@ def _render_detection_banner(detected: DetectionResult) -> str:
             conf_pct = int(detected.confidence * 100)
             st.warning(
                 f"{detected.icon} **{detected.label}** — confianza baja ({conf_pct}%)  \n"
-                f"Revisa si el tipo seleccionado es correcto."
+                "Revisa si el tipo seleccionado es correcto."
             )
         else:
             st.info(
@@ -54,40 +161,46 @@ def _render_detection_banner(detected: DetectionResult) -> str:
             help="Cambia el tipo si la detección automática no fue correcta.",
         )
 
-    if detected.suggestions:
-        for s in detected.suggestions:
-            st.caption(f"💡 {s}")
-
     return selected_type
 
 
 def _mapping_form(df: pd.DataFrame, dataset_type: str) -> dict[str, str | None]:
-    """Formulario de mapeo de columnas adaptado al tipo de dataset seleccionado."""
+    """Formulario de mapeo con las columnas sugeridas automáticamente."""
     schema = DATASET_SCHEMAS.get(dataset_type, DATASET_SCHEMAS["general"])
     fields = schema["fields"]
 
     if not fields:
-        st.info("Para el tipo 'Datos Generales' no se requiere mapeo de columnas. El ETL procesará todas las columnas automáticamente.")
+        st.info(
+            "Para **Datos Generales** no se requiere mapeo. "
+            "El ETL procesará todas las columnas automáticamente."
+        )
         return {}
 
-    # Para el tipo seleccionado usamos sus aliases; para financiero re-usamos guess_column_mapping
     if dataset_type == "financiero":
-        guessed = st.session_state.get("column_mapping") or guess_column_mapping(df)
+        guessed = _guess_mapping_for_type(df, dataset_type) if not st.session_state.get("column_mapping") else st.session_state["column_mapping"]
     else:
         guessed = _guess_mapping_for_type(df, dataset_type)
 
     options = get_column_options(df)
     mapping: dict[str, str | None] = {}
-
-    st.markdown("#### Mapeo de columnas")
-    st.caption(
-        f"El sistema sugiere columnas para **{schema['label']}**. "
-        "Corrígelas si es necesario antes de ejecutar el ETL."
-    )
-
-    cols = st.columns(2)
     required_fields = schema.get("required", [])
 
+    st.markdown("#### Mapeo de columnas")
+    col_desc, col_refresh = st.columns([5, 1])
+    with col_desc:
+        st.caption(
+            f"Sugerencia automática para **{schema['label']}**. "
+            "Puedes corregir el mapeo antes de procesar."
+        )
+    with col_refresh:
+        if st.button("↺ Re-mapear", help="Recalcula el mapeo automático", key="remap_btn"):
+            if dataset_type == "financiero":
+                st.session_state.column_mapping = guess_column_mapping(df)
+            else:
+                st.session_state.column_mapping = _guess_mapping_for_type(df, dataset_type)
+            st.rerun()
+
+    cols = st.columns(2)
     for index, (field_key, field_label) in enumerate(fields.items()):
         is_required = field_key in required_fields
         label_display = f"{field_label} *" if is_required else field_label
@@ -101,62 +214,39 @@ def _mapping_form(df: pd.DataFrame, dataset_type: str) -> dict[str, str | None]:
                 options=options,
                 index=default_index,
                 key=f"mapping_{dataset_type}_{field_key}",
-                help="Campo obligatorio" if is_required else None,
+                help="Campo obligatorio — sin esto el ETL no puede procesar los datos." if is_required else None,
             )
             mapping[field_key] = None if selected == "No usar" else selected
 
     st.caption("_(*) Campo obligatorio_")
 
+    # Solo mostramos advertencias, no errores bloqueantes
     validation = validate_mapping(mapping, dataset_type)
-    if validation.errors:
-        for error in validation.errors:
-            st.error(error)
-    if validation.warnings:
-        for warning in validation.warnings:
-            st.warning(warning)
+    for warning in validation.warnings:
+        st.warning(warning)
+    # Los errores de campos obligatorios los mostramos como advertencia aquí
+    # (el bloqueo real ocurre en ETL si el campo es crítico)
+    for error in validation.errors:
+        st.warning(f"⚠️ {error} — puedes continuar, pero el análisis será limitado.")
 
     return mapping
 
 
-def _guess_mapping_for_type(df: pd.DataFrame, dataset_type: str) -> dict[str, str | None]:
-    """Auto-detecta el mapeo de columnas para tipos no financieros."""
-    from src.utils.file_loader import normalize_name
-
-    schema = DATASET_SCHEMAS.get(dataset_type, {})
-    aliases_by_field = schema.get("aliases", {})
-    columns = list(df.columns)
-    normalized_columns = {normalize_name(col): col for col in columns}
-
-    mapping: dict[str, str | None] = {}
-    for field_key, aliases in aliases_by_field.items():
-        match = None
-        for alias in aliases:
-            norm = normalize_name(alias)
-            if norm in normalized_columns:
-                match = normalized_columns[norm]
-                break
-        if match is None:
-            for col in columns:
-                if any(normalize_name(alias) in normalize_name(col) for alias in aliases):
-                    match = col
-                    break
-        mapping[field_key] = match
-
-    return mapping
-
+# ──────────────────────────────────────────────────────────────────────────────
+# Vista principal
+# ──────────────────────────────────────────────────────────────────────────────
 
 def render() -> None:
     st.title("📁 Cargar datos")
-    st.write("Sube tu archivo o usa los datos de ejemplo para explorar el flujo completo.")
+    st.write("Sube tu archivo. El sistema detecta el tipo, mapea las columnas y procesa automáticamente.")
 
     with st.container(border=True):
         uploaded_file = st.file_uploader(
             "Archivo de datos",
             type=["csv", "txt", "xlsx", "xls"],
-            help="Formatos aceptados: CSV, TXT, XLSX y XLS. Tamaño máximo recomendado: 50 MB.",
+            help="Formatos aceptados: CSV, TXT, XLSX y XLS.",
         )
-
-        left, right = st.columns([1, 1])
+        left, right = st.columns(2)
         with left:
             use_sample = st.button("Usar datos de ejemplo", use_container_width=True)
         with right:
@@ -169,26 +259,34 @@ def render() -> None:
 
     if use_sample:
         df = build_sample_data()
+        mapping = guess_column_mapping(df)
         st.session_state.raw_data = df
         st.session_state.loaded_filename = "datos_ejemplo.csv"
-        st.session_state.column_mapping = guess_column_mapping(df)
+        st.session_state.column_mapping = mapping
         st.session_state.dataset_type = "financiero"
-        st.success("Datos de ejemplo cargados.")
+        st.session_state.auto_run_etl = True
+        st.session_state.clean_data = None
         st.rerun()
 
     if uploaded_file is not None:
         try:
             df = load_uploaded_file(uploaded_file)
             detected = detect_dataset_type(df)
+            dtype = detected.dataset_type
+            mapping = (
+                guess_column_mapping(df)
+                if dtype == "financiero"
+                else _guess_mapping_for_type(df, dtype)
+            )
             st.session_state.raw_data = df
             st.session_state.loaded_filename = uploaded_file.name
-            st.session_state.dataset_type = detected.dataset_type
-            # Guardamos el mapeo inicial basado en el tipo detectado
-            if detected.dataset_type == "financiero":
-                st.session_state.column_mapping = guess_column_mapping(df)
-            else:
-                st.session_state.column_mapping = _guess_mapping_for_type(df, detected.dataset_type)
-            st.success(f"✅ Archivo cargado: **{uploaded_file.name}** — {len(df):,} filas, {len(df.columns)} columnas.")
+            st.session_state.dataset_type = dtype
+            st.session_state.column_mapping = mapping
+            st.session_state.clean_data = None
+            st.success(
+                f"✅ **{uploaded_file.name}** cargado — "
+                f"{len(df):,} filas, {len(df.columns)} columnas."
+            )
         except Exception as exc:
             _show_upload_error(exc, uploaded_file.name)
             return
@@ -198,74 +296,101 @@ def render() -> None:
         st.info("Aún no hay datos cargados. Sube un archivo o usa los datos de ejemplo.")
         return
 
-    # Banner de detección / selección de tipo
+    # Banner de detección
     detected_for_banner = detect_dataset_type(raw_df)
     selected_type = _render_detection_banner(detected_for_banner)
 
-    # Si el usuario cambia el tipo, actualizamos el estado
+    # Si el usuario cambia el tipo manualmente, recalcular el mapeo
     if selected_type != st.session_state.get("dataset_type"):
         st.session_state.dataset_type = selected_type
-        if selected_type == "financiero":
-            st.session_state.column_mapping = guess_column_mapping(raw_df)
-        else:
-            st.session_state.column_mapping = _guess_mapping_for_type(raw_df, selected_type)
+        st.session_state.column_mapping = (
+            guess_column_mapping(raw_df)
+            if selected_type == "financiero"
+            else _guess_mapping_for_type(raw_df, selected_type)
+        )
+        st.session_state.clean_data = None
+        st.rerun()
 
     st.divider()
 
-    # Vista previa de los datos crudos
-    with st.expander("Vista previa del archivo original", expanded=True):
+    # Vista previa
+    with st.expander("Vista previa del archivo", expanded=False):
         st.caption(
-            f"Archivo: **{st.session_state.get('loaded_filename')}** — "
+            f"**{st.session_state.get('loaded_filename')}** — "
             f"{len(raw_df):,} filas × {len(raw_df.columns)} columnas"
         )
-        st.dataframe(raw_df.head(50), use_container_width=True)
+        st.dataframe(raw_df.head(30), use_container_width=True)
 
-    # Formulario de mapeo
+    # Mapeo de columnas
     mapping = _mapping_form(raw_df, selected_type)
 
-    if st.button("Guardar mapeo y continuar →", type="primary", use_container_width=True):
-        st.session_state.column_mapping = mapping
-        st.session_state.dataset_type = selected_type
-        st.session_state.clean_data = None  # Forzar re-ejecución del ETL
-        st.success("Mapeo guardado. Ve a **ETL y limpieza** para procesar los datos.")
+    st.divider()
 
+    # Botones de acción
+    col_auto, col_manual = st.columns(2)
+
+    with col_auto:
+        if st.button(
+            "▶ Procesar automáticamente",
+            type="primary",
+            use_container_width=True,
+            help="Guarda el mapeo y ejecuta el ETL en un solo paso.",
+        ):
+            st.session_state.column_mapping = mapping
+            st.session_state.dataset_type = selected_type
+            st.session_state.auto_run_etl = True
+            st.session_state.clean_data = None
+            st.switch_page("views/02_etl.py") if hasattr(st, "switch_page") else st.rerun()
+
+    with col_manual:
+        if st.button(
+            "Guardar mapeo →",
+            use_container_width=True,
+            help="Solo guarda el mapeo. Ve a ETL y limpieza para ejecutar después.",
+        ):
+            st.session_state.column_mapping = mapping
+            st.session_state.dataset_type = selected_type
+            st.session_state.clean_data = None
+            st.success("Mapeo guardado. Ve a **ETL y limpieza** en la barra lateral.")
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Errores de carga
+# ──────────────────────────────────────────────────────────────────────────────
 
 def _show_upload_error(exc: Exception, filename: str) -> None:
-    """Muestra un mensaje de error detallado y accionable al usuario."""
     msg = str(exc).lower()
-
     st.error(f"No se pudo leer **{filename}**.")
 
     if "codec" in msg or "encoding" in msg or "unicode" in msg:
         st.warning(
-            "**Problema de codificación de caracteres.**  \n"
-            "El archivo parece tener caracteres especiales (tildes, ñ, etc.) en un formato inesperado.  \n"
-            "**Solución:** Abre el archivo en Excel → Guardar como → CSV UTF-8 (con BOM)."
+            "**Problema de codificación.**  \n"
+            "El archivo tiene caracteres especiales (tildes, ñ) en un formato inesperado.  \n"
+            "**Solución:** Excel → Guardar como → CSV UTF-8 (con BOM)."
         )
     elif "excel" in msg or "openpyxl" in msg or "xlrd" in msg:
         st.warning(
-            "**Problema al leer el archivo Excel.**  \n"
-            "Puede estar dañado, protegido con contraseña, o en un formato muy antiguo (.xls).  \n"
+            "**Problema con el archivo Excel.**  \n"
+            "Puede estar dañado o protegido con contraseña.  \n"
             "**Solución:** Ábrelo en Excel y guárdalo como **.xlsx** o **CSV**."
         )
     elif "separator" in msg or "sep" in msg or "delimiter" in msg:
         st.warning(
-            "**No se detectó el separador del CSV.**  \n"
-            "El archivo puede usar punto y coma (;) o tabulador como separador.  \n"
-            "**Solución:** Abre el CSV en un editor de texto y verifica qué carácter separa las columnas."
+            "**Separador no detectado.**  \n"
+            "El CSV puede usar punto y coma (;) o tabulador.  \n"
+            "**Solución:** Verifica el separador abriendo el CSV en un editor de texto."
         )
     elif "empty" in msg or "no columns" in msg:
         st.warning(
-            "**El archivo parece estar vacío o sin columnas.**  \n"
-            "**Solución:** Verifica que el archivo tenga datos y que la primera fila sea el encabezado."
+            "**Archivo vacío o sin columnas.**  \n"
+            "**Solución:** Verifica que la primera fila tenga los nombres de columna."
         )
     else:
         st.warning(
-            "**Sugerencias generales:**\n"
-            "- Guarda el archivo como **CSV UTF-8** o **XLSX** e inténtalo de nuevo.\n"
+            "**Sugerencias:**\n"
+            "- Guarda como **CSV UTF-8** o **XLSX** e inténtalo de nuevo.\n"
             "- Verifica que el archivo no esté abierto en otro programa.\n"
-            "- Asegúrate de que la primera fila tenga los nombres de columna."
+            "- Asegúrate de que la primera fila tenga los encabezados."
         )
-
-    with st.expander("Detalle técnico del error"):
+    with st.expander("Detalle técnico"):
         st.exception(exc)

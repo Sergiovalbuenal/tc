@@ -21,6 +21,7 @@ DEFAULTS = {
     "cleaning_log": [],         # Notas de qué se limpió o corrigió
     "rejected_rows": None,      # Filas que no pudimos procesar por errores
     "last_validation": None,    # Resultado de la última revisión de calidad
+    "auto_run_etl": False,      # Si True, la página ETL ejecuta la limpieza automáticamente al cargar
 
     # IA (Gemini)
     "ai_chat_history": [],      # Lista de mensajes (user/assistant)

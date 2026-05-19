@@ -19,6 +19,26 @@ def _type_banner(dataset_type: str) -> None:
     )
 
 
+def _run_etl(raw_df, mapping, dataset_type, default_currency, drop_invalid, drop_duplicates) -> None:
+    """Ejecuta el pipeline y guarda los resultados en session_state."""
+    with st.spinner("Procesando datos…"):
+        result = run_pipeline(
+            raw_df,
+            mapping,
+            dataset_type=dataset_type,
+            default_currency=default_currency.upper() or "USD",
+            drop_invalid_rows=drop_invalid,
+            drop_duplicates=drop_duplicates,
+        )
+
+    validation = validate_clean_data(result.data, dataset_type)
+    st.session_state.clean_data = result.data
+    st.session_state.rejected_rows = result.rejected_rows
+    st.session_state.cleaning_log = result.log
+    st.session_state.last_validation = validation
+    st.session_state.auto_run_etl = False  # Resetear la bandera
+
+
 def render() -> None:
     st.title("🧹 ETL y limpieza")
 
@@ -31,16 +51,14 @@ def render() -> None:
 
     _type_banner(dataset_type)
 
+    # Mostrar advertencias de mapeo, pero NO bloquear el flujo
     mapping_validation = validate_mapping(mapping, dataset_type)
-    if mapping_validation.errors:
-        st.error("Revisa el mapeo de columnas en **Cargar datos** antes de continuar.")
-        for error in mapping_validation.errors:
-            st.write(f"- {error}")
-        if st.button("Ir a Cargar datos"):
-            st.session_state.page = "Cargar datos"
-            st.rerun()
-        return
+    for warning in mapping_validation.warnings:
+        st.warning(warning)
+    for error in mapping_validation.errors:
+        st.warning(f"⚠️ {error} — el análisis puede ser limitado sin este campo.")
 
+    # Opciones de limpieza
     with st.container(border=True):
         st.markdown("#### Opciones de limpieza")
 
@@ -49,44 +67,38 @@ def render() -> None:
             with col1:
                 default_currency = st.text_input("Moneda por defecto", value="USD", max_chars=3)
             with col2:
-                drop_invalid = st.checkbox("Quitar filas inválidas", value=True,
-                                           help="Elimina filas sin fecha o sin monto válido.")
+                drop_invalid = st.checkbox(
+                    "Quitar filas inválidas", value=True,
+                    help="Elimina filas sin fecha o sin monto válido.",
+                )
             with col3:
-                drop_duplicates = st.checkbox("Quitar duplicados", value=True,
-                                              help="Elimina filas idénticas en fecha, monto, tipo, categoría y cuenta.")
+                drop_duplicates = st.checkbox(
+                    "Quitar duplicados", value=True,
+                    help="Elimina filas idénticas en fecha, monto, tipo, categoría y cuenta.",
+                )
         else:
             col1, col2 = st.columns(2)
             with col1:
-                drop_invalid = st.checkbox("Quitar filas con campos obligatorios vacíos", value=False,
-                                           help="Elimina filas donde los campos requeridos estén vacíos.")
+                drop_invalid = st.checkbox(
+                    "Quitar filas con campos vacíos", value=False,
+                    help="Elimina filas donde los campos requeridos estén vacíos.",
+                )
             with col2:
                 drop_duplicates = st.checkbox("Quitar duplicados", value=True)
             default_currency = "USD"
 
-        run = st.button("▶ Ejecutar limpieza", type="primary", use_container_width=True)
+        run_btn = st.button("▶ Ejecutar limpieza", type="primary", use_container_width=True)
 
-    if run:
-        with st.spinner("Procesando datos…"):
-            result = run_pipeline(
-                raw_df,
-                mapping,
-                dataset_type=dataset_type,
-                default_currency=default_currency.upper() or "USD",
-                drop_invalid_rows=drop_invalid,
-                drop_duplicates=drop_duplicates,
-            )
+    # Auto-ejecución si viene del botón "Procesar automáticamente"
+    auto_run = st.session_state.get("auto_run_etl", False)
+    if auto_run and st.session_state.get("clean_data") is None:
+        _run_etl(raw_df, mapping, dataset_type, default_currency, drop_invalid, drop_duplicates)
+        st.rerun()
 
-        validation = validate_clean_data(result.data, dataset_type)
-        st.session_state.clean_data = result.data
-        st.session_state.rejected_rows = result.rejected_rows
-        st.session_state.cleaning_log = result.log
-        st.session_state.last_validation = validation
+    if run_btn:
+        _run_etl(raw_df, mapping, dataset_type, default_currency, drop_invalid, drop_duplicates)
 
-        if validation.ok:
-            st.success(f"✅ Limpieza terminada — {len(result.data):,} filas listas para análisis.")
-        else:
-            st.error("La limpieza terminó, pero hay problemas que revisar.")
-
+    # ── Resultados ────────────────────────────────────────────────────────────
     clean_df = st.session_state.get("clean_data")
     if clean_df is None:
         st.info("Configura las opciones y ejecuta la limpieza para generar el dataset final.")
@@ -94,44 +106,52 @@ def render() -> None:
 
     rejected = st.session_state.get("rejected_rows")
     rejected_count = 0 if rejected is None else len(rejected)
-
-    # Métricas de resultado
     total_raw = len(raw_df)
     pct_ok = (len(clean_df) / total_raw * 100) if total_raw > 0 else 0
 
+    validation = st.session_state.get("last_validation")
+    if validation and validation.ok:
+        st.success(f"✅ {len(clean_df):,} filas listas para análisis.")
+    elif validation and not validation.ok:
+        st.error("La limpieza terminó con algunos problemas.")
+
+    # Métricas
     a, b, c, d = st.columns(4)
     a.metric("Filas originales", f"{total_raw:,}")
     b.metric("Filas limpias", f"{len(clean_df):,}", delta=f"{pct_ok:.1f}% conservado")
-    c.metric("Rechazadas", f"{rejected_count:,}", delta=f"-{rejected_count}" if rejected_count else None,
-             delta_color="inverse")
-    d.metric("Columnas", f"{len(clean_df.columns):,}")
+    c.metric(
+        "Rechazadas", f"{rejected_count:,}",
+        delta=f"-{rejected_count}" if rejected_count else None,
+        delta_color="inverse",
+    )
+    d.metric("Columnas útiles", f"{len([c for c in clean_df.columns if not c.startswith('_')]):,}")
 
     # Log de limpieza
     with st.expander("📋 Log de limpieza", expanded=True):
         for item in st.session_state.get("cleaning_log", []):
             st.write(f"- {item}")
 
-    # Advertencias y errores de validación
-    validation = st.session_state.get("last_validation")
+    # Validaciones
     if validation:
         for warning in validation.warnings:
             st.warning(warning)
         for error in validation.errors:
             st.error(error)
 
-    # Vista previa del dataset limpio
-    st.subheader("Vista previa del dataset limpio")
-    st.dataframe(clean_df.head(100), use_container_width=True)
+    # Vista previa
+    st.subheader("Dataset limpio")
+    visible_cols = [c for c in clean_df.columns if not c.startswith("_")]
+    st.dataframe(clean_df[visible_cols].head(100), use_container_width=True)
 
-    # Filas rechazadas con razón
+    # Filas rechazadas
     if rejected is not None and not rejected.empty:
-        with st.expander(f"⚠️ Filas rechazadas ({rejected_count:,})", expanded=rejected_count > 0):
+        with st.expander(f"⚠️ Filas rechazadas ({rejected_count:,})", expanded=False):
             reason_col = "_razon_rechazo"
             if reason_col in rejected.columns:
-                reason_counts = rejected[reason_col].value_counts()
                 st.markdown("**Motivos de rechazo:**")
-                for reason, count in reason_counts.items():
+                for reason, count in rejected[reason_col].value_counts().items():
                     st.write(f"- {reason}: **{count}** fila(s)")
                 st.divider()
-            st.dataframe(rejected, use_container_width=True)
-            st.caption("Descarga las filas rechazadas para revisarlas y corregirlas manualmente.")
+            visible_rej = [c for c in rejected.columns if not c.startswith("_") or c == "_razon_rechazo"]
+            st.dataframe(rejected[visible_rej], use_container_width=True)
+            st.caption("Corrígelas en el archivo original y vuelve a cargar para incluirlas.")
