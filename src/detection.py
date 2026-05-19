@@ -71,14 +71,17 @@ def detect_dataset_type(df: pd.DataFrame) -> DetectionResult:
     best_score_val = max((s for s, _ in scores.values()), default=0.0)
 
     if best_score_val < 0.15:
-        schema = DATASET_SCHEMAS["general"]
+        # Sin coincidencias suficientes: se asume financiero como default
+        # (comportamiento histórico del dashboard) con confianza 0 para que
+        # el usuario sepa que fue una suposición y pueda corregirla.
+        schema = DATASET_SCHEMAS["financiero"]
         return DetectionResult(
-            dataset_type="general",
+            dataset_type="financiero",
             label=schema["label"],
             icon=schema["icon"],
             confidence=0.0,
-            description=schema["description"],
-            suggestions=["Selecciona el tipo de datos manualmente para obtener mejores sugerencias de ETL."],
+            description="No se detectó el tipo automáticamente — se asume Financiero por defecto.",
+            suggestions=["Revisa el tipo de datos en el selector y cámbialo si es necesario."],
         )
 
     best_type = max(scores, key=lambda k: scores[k][0])

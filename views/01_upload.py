@@ -283,6 +283,8 @@ def render() -> None:
             st.session_state.dataset_type = dtype
             st.session_state.column_mapping = mapping
             st.session_state.clean_data = None
+            # Forzar sincronización del widget selectbox con el tipo detectado
+            st.session_state["dataset_type_selector"] = dtype
             st.success(
                 f"✅ **{uploaded_file.name}** cargado — "
                 f"{len(df):,} filas, {len(df.columns)} columnas."
@@ -335,18 +337,22 @@ def render() -> None:
             type="primary",
             use_container_width=True,
             help="Guarda el mapeo y ejecuta el ETL en un solo paso.",
+            key="btn_auto_process",
         ):
             st.session_state.column_mapping = mapping
             st.session_state.dataset_type = selected_type
             st.session_state.auto_run_etl = True
             st.session_state.clean_data = None
-            st.switch_page("views/02_etl.py") if hasattr(st, "switch_page") else st.rerun()
+            # Navegar a ETL usando el sistema de redirección de app.py
+            st.session_state.page_to_redirect = "etl"
+            st.rerun()
 
     with col_manual:
         if st.button(
             "Guardar mapeo →",
             use_container_width=True,
             help="Solo guarda el mapeo. Ve a ETL y limpieza para ejecutar después.",
+            key="btn_save_mapping",
         ):
             st.session_state.column_mapping = mapping
             st.session_state.dataset_type = selected_type
