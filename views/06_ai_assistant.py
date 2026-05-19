@@ -66,6 +66,44 @@ Formato de respuesta (siempre JSON válido):
 def _available_providers() -> list[tuple[str, str]]:
     """Retorna lista de (key, label) para los proveedores configurados."""
     providers: list[tuple[str, str]] = []
+
+    # --- diagnóstico visible (eliminar cuando todo funcione) ---
+    with st.expander("🔧 Diagnóstico de proveedores", expanded=True):
+        # Anthropic
+        try:
+            import anthropic as _anth  # type: ignore
+            st.write(f"✅ `anthropic` instalado — versión {_anth.__version__}")
+        except Exception as e:
+            st.error(f"❌ `anthropic` NO instalado: {e}")
+
+        # Clave Anthropic
+        try:
+            import os
+            key_env = os.getenv("ANTHROPIC_API_KEY")
+            key_sec = st.secrets.get("ANTHROPIC_API_KEY", None)
+            st.write(f"🔑 ANTHROPIC_API_KEY env: `{'sí' if key_env else 'no'}`  |  secrets: `{'sí' if key_sec else 'no'}`")
+        except Exception as e:
+            st.write(f"⚠️ Error leyendo clave Anthropic: {e}")
+
+        # Gemini clave
+        try:
+            import os
+            gkey_env = os.getenv("GEMINI_API_KEY")
+            gkey_sec = st.secrets.get("GEMINI_API_KEY", None)
+            gkey_nested = st.secrets.get("gemini", {}).get("api_key", None) if "gemini" in st.secrets else None
+            st.write(f"🔑 GEMINI_API_KEY env: `{'sí' if gkey_env else 'no'}`  |  secrets raíz: `{'sí' if gkey_sec else 'no'}`  |  [gemini].api_key: `{'sí' if gkey_nested else 'no'}`")
+        except Exception as e:
+            st.write(f"⚠️ Error leyendo clave Gemini: {e}")
+
+        # ClaudeProvider
+        try:
+            from src.ai.claude_client import ClaudeProvider
+            av = ClaudeProvider.is_available()
+            st.write(f"🤖 ClaudeProvider.is_available() → `{av}`")
+        except Exception as e:
+            st.error(f"❌ Error importando ClaudeProvider: {e}")
+    # --- fin diagnóstico ---
+
     try:
         from src.ai.gemini_client import GeminiProvider
         if GeminiProvider.is_available():
